@@ -69,6 +69,35 @@ exports.fetchFromFipe = async (path) => {
   }
 };
 
+// Map de aliases -> tipos da FIPE v2
+const TYPE_MAP = {
+  cars: "cars",
+  car: "cars",
+  carro: "cars",
+  carros: "cars",
+  motorcycles: "motorcycles",
+  motorcycle: "motorcycles",
+  moto: "motorcycles",
+  motos: "motorcycles",
+  trucks: "trucks",
+  truck: "trucks",
+  caminhao: "trucks",
+  caminhoes: "trucks",
+  caminhões: "trucks",
+};
+const toApiType = (t) => TYPE_MAP[String(t || "cars").toLowerCase()] || "cars";
+
+const resolveYear = (years, ano) => {
+  const list = Array.isArray(years) ? years : [];
+  const s = String(ano ?? "");
+  let found = list.find((y) => sameCode(y.code, s));
+  if (!found) {
+    const y = s.match(/^\d{4}/)?.[0];
+    if (y) found = list.find((e) => String(e.code).startsWith(`${y}-`));
+  }
+  return found || list[0] || { code: s, name: s };
+};
+
 exports.formatarCarro = async ({ tipo, marca, modelo, ano }) => {
   // Guarda de parâmetros para evitar 400 na FIPE
   if (!tipo || !marca || !ano || !modelo) {
@@ -81,39 +110,54 @@ exports.formatarCarro = async ({ tipo, marca, modelo, ano }) => {
     return { tipo, marca, modelo, ano }; // devolve “cru”, sem chamar a FIPE
   }
 
-  // A FIPE usa 'cars' e 'motorcycles'
-  const tipoAPI =
-    tipo === "moto" || tipo === "motorcycle" ? "motorcycles" : "cars";
+  // Tenta no tipo informado; se falhar, tenta o alternativo (cars <-> motorcycles)
+  const first = toApiType(tipo);
+  const fallback = first === "cars" ? "motorcycles" : "cars";
+  const typesToTry = [first, fallback];
 
   try {
-    // 1) Marcas
-    // Obs: getFipe já volta array (ou []) mesmo em erro
-    const brandsRaw = await getFipe(`${tipoAPI}/brands`, ["brands", "marcas"]);
-    const nomeMarca = pickNameByCode(brandsRaw, marca, "name", "code");
+    for (const tipoAPI of typesToTry) {
+      // 1) Marcas
+      const brandsRaw = await getFipe(`${tipoAPI}/brands`, [
+        "brands",
+        "marcas",
+      ]);
+      const nomeMarca = pickNameByCode(brandsRaw, marca, "name", "code");
 
-    // 2) Anos (para uma marca)
-    const yearsRaw = await getFipe(`${tipoAPI}/brands/${marca}/years`, [
-      "years",
-      "anos",
-    ]);
-    const nomeAno = getYearLabel(yearsRaw, ano);
+      // 2) Modelos (marca)
+      const modelsRaw = await getFipe(`${tipoAPI}/brands/${marca}/models`, [
+        "models",
+        "modelos",
+      ]);
+      if (!modelsRaw.length) continue; // tenta o outro tipo
+      const nomeModelo = pickNameByCode(modelsRaw, modelo, "name", "code");
 
-    // 3) Modelos (para marca + ano)
-    const modelsRaw = await getFipe(
-      `${tipoAPI}/brands/${marca}/years/${ano}/models`,
-      ["models", "modelos"]
-    );
-    const nomeModelo = pickNameByCode(modelsRaw, modelo, "name", "code");
+      // 3) Anos (modelo)
+      const yearsRaw = await getFipe(
+        `${tipoAPI}/brands/${marca}/models/${modelo}/years`,
+        ["years", "anos"]
+      );
+      if (!yearsRaw.length) continue;
+      const year = resolveYear(yearsRaw, ano); // casa "2019-5" ou cai para "2019-*"
 
-    return {
-      tipo: tipo === "moto" ? "moto" : "carro",
-      marca: nomeMarca,
-      modelo: nomeModelo,
-      ano: nomeAno,
-    };
+      return {
+        tipo:
+          tipoAPI === "motorcycles"
+            ? "moto"
+            : tipoAPI === "trucks"
+            ? "caminhão"
+            : "carro",
+        marca: nomeMarca,
+        modelo: nomeModelo,
+        ano: year.name, // rótulo completo ex.: "2019 Gasolina"
+        ano_label: year.name, // alias útil p/ services
+        ano_codigo: year.code, // ex.: "2019-1"
+      };
+    }
+    // se nenhuma tentativa deu certo, cai no fallback abaixo
   } catch (err) {
     console.error("Erro ao formatar carro FIPE:", err?.message || err);
-    // Fallback seguro (nunca lança para não derrubar o fluxo do match)
+    // Fallback seguro (nunca lança para não derrubar o fluxo)
     return { tipo, marca, modelo, ano };
   }
 };
